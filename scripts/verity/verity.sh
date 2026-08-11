@@ -104,16 +104,25 @@ function handle_ctrlc()
 trap handle_ctrlc SIGINT
 trap handle_ctrlc EXIT
 
+ARCH=$(uname -m)
 DISK_FORMAT=${DISK_FORMAT:-"raw"}
 APPLY_VERITY=${APPLY_VERITY:-"true"}
 CONSOLE_KERNEL=${CONSOLE_KERNEL:-"false"}
-ROOT_PARTITION_UUID=${ROOT_PARTITION_UUID:-"4f68bce3-e8cd-4db1-96e7-fbcaf984b709"}
+if [ "$ARCH" = "s390x" ]; then
+    DEFAULT_ROOT_PART_UUID="69a113b8-15a0-4e37-a5b6-3e10a03e0343"
+    CONSOLE_CMDLINE="console=ttysclp0"
+    VERITY_PART_TYPE="root-s390x-verity"
+else
+    DEFAULT_ROOT_PART_UUID="4f68bce3-e8cd-4db1-96e7-fbcaf984b709"
+    CONSOLE_CMDLINE="console=ttyS0"
+    VERITY_PART_TYPE="root-x86-64-verity"
+fi
+ROOT_PARTITION_UUID=${ROOT_PARTITION_UUID:-"$DEFAULT_ROOT_PART_UUID"}
 NBD_DEV=${NBD_DEV:-"0"}
 NBD_DEVICE=/dev/nbd${NBD_DEV}
 RESIZE_DISK=${RESIZE_DISK:-"yes"}
 
 EFI_PARTITION_UUID="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
-CONSOLE_CMDLINE="console=ttyS0"
 
 function resize_disk()
 {
@@ -134,18 +143,20 @@ function resize_disk()
 
 function find_efi_root_part()
 {
-    echo "Searching for root partition..."
-    EFI_PN=$(lsblk -o NAME,PARTTYPE -r $NBD_DEVICE | grep $EFI_PARTITION_UUID)
-    num_results=$(echo "$EFI_PN" | wc -l)
-    if [[ "$num_results" -ne 1 || -z "$EFI_PN" ]]; then
-        echo "Error: Expected one EFI System Partition, found $num_results."
-        exit 1
+    echo "Searching for partitions..."
+    if [ "$ARCH" != "s390x" ]; then
+        EFI_PN=$(lsblk -o NAME,PARTTYPE -r $NBD_DEVICE | grep -i $EFI_PARTITION_UUID || true)
+        num_results=$(echo "$EFI_PN" | grep -v '^$' | wc -l || true)
+        if [[ "$num_results" -ne 1 || -z "$EFI_PN" ]]; then
+            echo "Error: Expected one EFI System Partition, found $num_results."
+            exit 1
+        fi
+        EFI_PN=$(echo $EFI_PN | awk '{print  $1}')
+        echo EFI PARTITION=$EFI_PN
     fi
-    EFI_PN=$(echo $EFI_PN | awk '{print  $1}')
-    echo EFI PARTITION=$EFI_PN
 
-    ROOT_PN=$(lsblk -o NAME,PARTTYPE -r $NBD_DEVICE | grep $ROOT_PARTITION_UUID)
-    num_results=$(echo "$ROOT_PN" | wc -l)
+    ROOT_PN=$(lsblk -o NAME,PARTTYPE -r $NBD_DEVICE | grep -i $ROOT_PARTITION_UUID || true)
+    num_results=$(echo "$ROOT_PN" | grep -v '^$' | wc -l || true)
     if [[ "$num_results" -ne 1 || -z "$ROOT_PN" ]]; then
         echo "Error: Expected one Root $ROOT_PARTITION_UUID, found $num_results."
         exit 1
@@ -198,7 +209,7 @@ function apply_dmverity()
     VerityMatchKey=root
     SizeMaxBytes=${current_size}" > $WORKDIR/root.conf
 
-    SYSTEMD_LOG_LEVEL=debug systemd-repart $NBD_DEVICE --dry-run=no --definitions=$WORKDIR --no-pager --json=pretty | jq -r '.[] | select(.type == "root-x86-64-verity") | .roothash' > $WORKDIR/roothash.txt
+    SYSTEMD_LOG_LEVEL=debug systemd-repart $NBD_DEVICE --dry-run=no --definitions=$WORKDIR --no-pager --json=pretty | jq -r ".[] | select(.type == \"$VERITY_PART_TYPE\") | .roothash" > $WORKDIR/roothash.txt
     RH=$(cat $WORKDIR/roothash.txt)
     rm -rf $WORKDIR
 
@@ -280,12 +291,12 @@ qemu-nbd -c $NBD_DEVICE -f $DISK_FORMAT $DISK
 udevadm settle
 sleep 2
 
-# Step 1. Find the EFI partition automatically
+# Step 1. Find the EFI and root partition
 echo ""
 find_efi_root_part
 
 # Step 2. Apply cmdline to /EFI/redhat/BOOTX64.CSV
-if [ "$CONSOLE_KERNEL" = "true" ]; then
+if [ "$CONSOLE_KERNEL" = "true" ] && [ "$ARCH" != "s390x" ]; then
     echo ""
     fix_bootx_cmdline
 fi
@@ -298,9 +309,13 @@ if [ "$APPLY_VERITY" = "true" ]; then
     echo ""
     apply_dmverity
 
-    # Step 4. Prepare and install the addon
-    echo ""
-    create_uki_addon
+    # Step 4. Prepare and install the addon (x86_64 UEFI)
+    if [ "$ARCH" != "s390x" ]; then
+        echo ""
+        create_uki_addon
+    else
+        echo "Verity applied with Root Hash: $RH. On s390x, append 'roothash=$RH systemd.volatile=overlay' to zipl boot configuration."
+    fi
 fi
 
 
