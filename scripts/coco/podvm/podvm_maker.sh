@@ -26,6 +26,12 @@ EOF
 if [ -n "${PROVIDER}" ]; then
     echo "ExecStart=-/usr/bin/afterburn --provider=${PROVIDER} --check-in" >> /etc/systemd/system/afterburn-checkin.service
 fi
+
+cat <<EOF >> /etc/systemd/system/afterburn-checkin.service
+
+[Install]
+WantedBy=multi-user.target
+EOF
 ln -s ../afterburn-checkin.service /etc/systemd/system/multi-user.target.wants/afterburn-checkin.service
 
 tar -xzvf /tmp/podvm-binaries.tar.gz -C /
@@ -34,7 +40,7 @@ tar -xzvf /tmp/pause-bundle.tar.gz -C /
 # TODO: move to payload ?
 tar -xzvf /tmp/luks-config.tar.gz -C /
 
-dnf remove -y cloud-init WALinuxAgent
+dnf remove -y cloud-init WALinuxAgent || dnf remove -y cloud-init
 
 # fixes a failure of the podns@netns service, paths differ due to Selinux equivalency rules
 semanage fcontext -a -t bin_t /usr/bin/ip && restorecon -v /usr/sbin/ip

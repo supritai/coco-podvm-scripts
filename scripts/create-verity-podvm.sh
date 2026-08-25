@@ -1,7 +1,8 @@
 #!/bin/bash
 set -e
 
-# required packages: jq, az, openssl, qemu-img, sbsigntools
+# required packages: jq, openssl, qemu-img, guestfs-tools, libguestfs-tools
+# s390x: additionally s390utils-base; x86_64: additionally sbsigntools, systemd-ukify
 
 INPUT_IMAGE=$1
 
@@ -29,7 +30,7 @@ function local_help()
     echo "RESIZE_DISK:                optional   - whether to increase disk size by 10% to accomodate verity partition. Default: yes"
     echo "NBD_DEV:                    optional   - nbd\$NBD_DEV where to temporarily mount the disk. Default: 0"
     echo "VERITY_SCRIPT_LOCATION:     optional   - location of the verity.sh script. Default: $SCRIPT_FOLDER/verity/verity.sh"
-    echo "ROOT_PARTITION_UUID:        optional   - UUID to find the root. Defaults to the x86_64 part type"
+    echo "ROOT_PARTITION_UUID:        optional   - UUID to find the root. Defaults to arch-specific part type (x86_64 or s390x)"
     echo ""
     echo "CoCo guest options (define them as variable):"
     echo ""

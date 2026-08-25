@@ -6,9 +6,10 @@ export KERNEL_VERSION=6.12.0-211.16.1.el10_2
 export NVIDIA_DRIVER_VERSION=595.58.03
 
 if [ "$ARCH" = "s390x" ]; then
-  dnf install -y kernel-${KERNEL_VERSION} kernel-modules-${KERNEL_VERSION} kernel-modules-extra-${KERNEL_VERSION} s390utils-base s390utils-zipl
+  dnf install -y kernel-${KERNEL_VERSION} kernel-modules-${KERNEL_VERSION} kernel-modules-extra-${KERNEL_VERSION} s390utils-base
   echo "removing previous kernel pkgs:" $(rpm -qa "kernel*" | grep -Ev "${KERNEL_VERSION}")
   rpm -qa "kernel*" | grep -Ev "${KERNEL_VERSION}" | xargs -r rpm -e --nodeps || true
+  dnf clean all
 else
   dnf install -y kernel-{uki-virt,modules,modules-extra}-${KERNEL_VERSION}
   # Update shim fallback CSV to ensure Azure VM boots latest UKI (needed only when kernel is updated)

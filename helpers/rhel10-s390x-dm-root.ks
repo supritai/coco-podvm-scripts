@@ -34,16 +34,20 @@ kernel-modules
 kernel-modules-extra
 redhat-release
 
+-*gpu-firmware*
+-linux-firmware*
+-iwl*
+
 cloud-init
 cloud-utils-growpart
 NetworkManager-cloud-setup
 
 cryptsetup
 s390utils-base
-s390utils-zipl
 
 python3-dnf-plugin-versionlock
 
+tpm2-tools
 afterburn
 e2fsprogs
 
@@ -52,9 +56,9 @@ e2fsprogs
 firstboot --disable
 
 ignoredisk --only-use=sda
-clearpart --none --initlabel
+clearpart --all --initlabel --drives=sda
 
-part / --fstype="ext4" --ondisk=sda --grow --maxsize=0
+part / --fstype="ext4" --ondisk=sda --grow
 
 %post --erroronfail
 
