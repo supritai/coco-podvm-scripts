@@ -1,21 +1,29 @@
 #!/bin/bash
 set -ex
 
+ARCH=$(uname -m)
 export KERNEL_VERSION=6.12.0-211.16.1.el10_2
 export NVIDIA_DRIVER_VERSION=595.58.03
 
-dnf install -y kernel-{uki-virt,modules,modules-extra}-${KERNEL_VERSION}
-# Update shim fallback CSV to ensure Azure VM boots latest UKI (needed only when kernel is updated)
-printf "shimx64.efi,redhat,\\\EFI\\\Linux\\\\"`cat /etc/machine-id`"-"`rpm -q --queryformat %{VERSION}-%{RELEASE}\\\n kernel-uki-virt | tail -1`".x86_64.efi ,UKI bootentry\n" | iconv -f ASCII -t UCS-2 > /boot/efi/EFI/redhat/BOOTX64.CSV
+if [ "$ARCH" = "s390x" ]; then
+  dnf install -y kernel-${KERNEL_VERSION} kernel-modules-${KERNEL_VERSION} kernel-modules-extra-${KERNEL_VERSION} s390utils-base
+  echo "removing previous kernel pkgs:" $(rpm -qa "kernel*" | grep -Ev "${KERNEL_VERSION}")
+  rpm -qa "kernel*" | grep -Ev "${KERNEL_VERSION}" | xargs -r rpm -e --nodeps || true
+  dnf clean all
+else
+  dnf install -y kernel-{uki-virt,modules,modules-extra}-${KERNEL_VERSION}
+  # Update shim fallback CSV to ensure Azure VM boots latest UKI (needed only when kernel is updated)
+  printf "shimx64.efi,redhat,\\\EFI\\\Linux\\\\"`cat /etc/machine-id`"-"`rpm -q --queryformat %{VERSION}-%{RELEASE}\\\n kernel-uki-virt | tail -1`".x86_64.efi ,UKI bootentry\n" | iconv -f ASCII -t UCS-2 > /boot/efi/EFI/redhat/BOOTX64.CSV
 
-echo "removing previous kernel pkgs:" $(rpm -qa "kernel*" | grep -Ev "${KERNEL_VERSION}|^kernel-uki")
-rpm -qa "kernel*" | grep -Ev "${KERNEL_VERSION}|^kernel-uki"  | xargs -r rpm -e --nodeps
+  echo "removing previous kernel pkgs:" $(rpm -qa "kernel*" | grep -Ev "${KERNEL_VERSION}|^kernel-uki")
+  rpm -qa "kernel*" | grep -Ev "${KERNEL_VERSION}|^kernel-uki"  | xargs -r rpm -e --nodeps || true
 
-# TODO: check if this still needed when we switch to using NVIDIA attestation RPMs.
-dnf install -y xmlsec1 xmlsec1-openssl
+  # TODO: check if this still needed when we switch to using NVIDIA attestation RPMs.
+  dnf install -y xmlsec1 xmlsec1-openssl
+fi
 
 ##### NVIDIA DRIVERS
-if [ -n "${NVIDIA_DRIVER_VERSION}" ]; then
+if [ -n "${NVIDIA_DRIVER_VERSION}" ] && [ "$ARCH" != "s390x" ]; then
   subscription-manager repos --enable=rhel-10-for-x86_64-supplementary-rpms
   subscription-manager repos --enable=rhel-10-for-x86_64-extensions-rpms
   dnf install -y --setopt=install_weak_deps=False nvidia-driver-${NVIDIA_DRIVER_VERSION} \

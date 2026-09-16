@@ -1,10 +1,18 @@
 #! /bin/bash
 
+ARCH=$(uname -m)
+PROVIDER=${AFTERBURN_PROVIDER:-""}
+SERIAL_TTY="ttyS0"
+
+if [ "$ARCH" = "s390x" ]; then
+    SERIAL_TTY="ttysclp0"
+fi
+
 # See SM_REGISTER in scripts/coco/coco-components.sh for subscription-manager setup
 if subscription-manager identity &>/dev/null; then
     dnf install -y afterburn e2fsprogs && dnf clean all
 else
-    dnf config-manager --add-repo=https://mirror.stream.centos.org/10-stream/AppStream/x86_64/os/ && dnf install -y --nogpgcheck afterburn e2fsprogs && dnf clean all && dnf config-manager --set-disabled "*centos*"
+    dnf config-manager --add-repo=https://mirror.stream.centos.org/10-stream/AppStream/${ARCH}/os/ && dnf install -y --nogpgcheck afterburn e2fsprogs && dnf clean all && dnf config-manager --set-disabled "*centos*"
 fi
 
 cat <<EOF > /etc/systemd/system/afterburn-checkin.service
@@ -13,7 +21,16 @@ ConditionKernelCommandLine=
 
 [Service]
 ExecStart=
-ExecStart=-/usr/bin/afterburn --provider=azure --check-in
+EOF
+
+if [ -n "${PROVIDER}" ]; then
+    echo "ExecStart=-/usr/bin/afterburn --provider=${PROVIDER} --check-in" >> /etc/systemd/system/afterburn-checkin.service
+fi
+
+cat <<EOF >> /etc/systemd/system/afterburn-checkin.service
+
+[Install]
+WantedBy=multi-user.target
 EOF
 ln -s ../afterburn-checkin.service /etc/systemd/system/multi-user.target.wants/afterburn-checkin.service
 
@@ -23,7 +40,7 @@ tar -xzvf /tmp/pause-bundle.tar.gz -C /
 # TODO: move to payload ?
 tar -xzvf /tmp/luks-config.tar.gz -C /
 
-dnf remove -y cloud-init WALinuxAgent
+dnf remove -y cloud-init WALinuxAgent || dnf remove -y cloud-init
 
 # fixes a failure of the podns@netns service, paths differ due to Selinux equivalency rules
 semanage fcontext -a -t bin_t /usr/bin/ip && restorecon -v /usr/sbin/ip
@@ -61,7 +78,7 @@ chmod +x /usr/libexec/gen-issue
 cat  <<EOF > /etc/systemd/system/gen-issue.service
 [Unit]
 Description=Generate issue to print to serial console at startup
-Before=serial-getty@ttyS0.service
+Before=serial-getty@${SERIAL_TTY}.service
 After=process-user-data.service
 
 [Service]

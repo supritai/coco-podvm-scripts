@@ -12,15 +12,16 @@ RUN --mount=type=secret,id=org_id --mount=type=secret,id=activation_key if [[ -f
 RUN dnf -y update
 
 # packages needed
-RUN dnf install -y cpio systemd-ukify jq openssl qemu-img libguestfs podman && dnf clean all
-
-# Add EPEL
-RUN curl -O https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm && \
-    dnf install -y epel-release-latest-9.noarch.rpm && \
-    rm epel-release-latest-9.noarch.rpm
-
-# Install virt-customize and dependencies
-RUN dnf install -y guestfs-tools libguestfs-tools sbsigntools
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "s390x" ]; then \
+        dnf install -y cpio jq openssl qemu-img libguestfs podman guestfs-tools libguestfs-tools s390utils-base && dnf clean all; \
+    else \
+        dnf install -y cpio systemd-ukify jq openssl qemu-img libguestfs podman && \
+        curl -O https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm && \
+        dnf install -y epel-release-latest-9.noarch.rpm && \
+        rm epel-release-latest-9.noarch.rpm && \
+        dnf install -y guestfs-tools libguestfs-tools sbsigntools && dnf clean all; \
+    fi
 
 # scripts
 ADD scripts /scripts

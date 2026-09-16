@@ -193,7 +193,12 @@ spec:
 
         time sudo podman exec --latest bash -c 'until virsh list --all >/dev/null 2>&1; do sleep 2; done'
 
-        time sudo podman exec -t --latest virt-install --virt-type qemu --cpu host-model --os-variant rhel10.0 --arch x86_64 --boot uefi --name disk --memory 8192 --location /workspace/rhel.iso --disk path=$DISK,format=qcow2,bus=scsi,size=7 --initrd-inject=/workspace/source/helpers/rhel10-dm-root.ks --nographics --extra-args 'console=ttyS0 inst.ks=file:/rhel10-dm-root.ks' --transient
+        ARCH=$(uname -m)
+        if [ "$ARCH" = "s390x" ]; then
+          time sudo podman exec -t --latest virt-install --virt-type qemu --cpu host-model --os-variant rhel10.0 --arch s390x --name disk --memory 8192 --location /workspace/rhel.iso --disk path=$DISK,format=qcow2,bus=scsi,size=7 --initrd-inject=/workspace/source/helpers/rhel10-s390x-dm-root.ks --nographics --extra-args 'console=ttysclp0 inst.ks=file:/rhel10-s390x-dm-root.ks' --transient
+        else
+          time sudo podman exec -t --latest virt-install --virt-type qemu --cpu host-model --os-variant rhel10.0 --arch x86_64 --boot uefi --name disk --memory 8192 --location /workspace/rhel.iso --disk path=$DISK,format=qcow2,bus=scsi,size=7 --initrd-inject=/workspace/source/helpers/rhel10-dm-root.ks --nographics --extra-args 'console=ttyS0 inst.ks=file:/rhel10-dm-root.ks' --transient
+        fi
 
         # disk modifications in registered system
         time sudo podman exec -t --latest virt-customize \
@@ -234,72 +239,79 @@ spec:
         #!/bin/bash
         set -ex
 
-        dnf install -y kernel-{uki-virt,modules,modules-extra}-${KERNEL_VERSION}
-        # Update shim fallback CSV to ensure Azure VM boots latest UKI (needed only when kernel is updated)
-        printf "shimx64.efi,redhat,\\\\\\EFI\\\\\\Linux\\\\\\\"\$(cat /etc/machine-id)"-"\$(rpm -q --queryformat %{VERSION}-%{RELEASE}\\\\\\n kernel-uki-virt | tail -1)".x86_64.efi ,UKI bootentry\n" | iconv -f ASCII -t UCS-2 > /boot/efi/EFI/redhat/BOOTX64.CSV
-
-        echo "removing previous kernel pkgs:" \$(rpm -qa "kernel*" | grep -Ev "${KERNEL_VERSION}|^kernel-uki")
-        rpm -qa "kernel*" | grep -Ev "${KERNEL_VERSION}|^kernel-uki"  | xargs -r rpm -e --nodeps
-
-        # TODO: check if this still needed when we switch to using NVIDIA attestation RPMs.
-        dnf install -y xmlsec1 xmlsec1-openssl
-
-        ##### NVIDIA DRIVERS
-        if [ -n "${NVIDIA_DRIVER_VERSION}" ]; then
-          subscription-manager repos --enable=rhel-10-for-x86_64-supplementary-rpms
-          subscription-manager repos --enable=rhel-10-for-x86_64-extensions-rpms
-          dnf install -y --setopt=install_weak_deps=False nvidia-driver-${NVIDIA_DRIVER_VERSION} \
-              nvidia-driver-cuda-${NVIDIA_DRIVER_VERSION} \
-              nvidia-driver-libs-${NVIDIA_DRIVER_VERSION} \
-              nvidia-persistenced-${NVIDIA_DRIVER_VERSION} \
-              kmod-nvidia-open-${NVIDIA_DRIVER_VERSION}-${KERNEL_VERSION%.el*} \
-              nvidia-container-toolkit
-          dnf clean all
-
-          echo -e "blacklist nouveau\nblacklist nova_core" > /etc/modprobe.d/blacklist_nv_alt.conf
-          sed -i 's/^#no-cgroups = false/no-cgroups = true/' /etc/nvidia-container-runtime/config.toml
-
-          cat << 'EOF' > /usr/local/bin/generate-nvidia-cdi.sh
-        #!/bin/bash
-
-        # Check if NVIDIA GPU is present
-        if ! lspci | grep -i nvidia > /dev/null 2>&1; then
-            echo "No NVIDIA GPU detected, skipping NVIDIA setup" | tee /var/log/nvidia-cdi-gen.log
-            exit 0
-        fi
-
-        # Load drivers
-        nvidia-ctk -d system create-device-nodes --control-devices --load-kernel-modules
-
-        nvidia-persistenced
-
-        # Set confidential compute to ready state (non-fatal if unsupported)
-        if nvidia-smi conf-compute -srs 1 2>/dev/null; then
-            echo "Confidential Compute enabled" | tee -a /var/log/nvidia-cdi-gen.log
+        ARCH=\$(uname -m)
+        if [ "\$ARCH" = "s390x" ]; then
+          dnf install -y kernel-\${KERNEL_VERSION} kernel-modules-\${KERNEL_VERSION} kernel-modules-extra-\${KERNEL_VERSION} s390utils-base s390utils-zipl
+          echo "removing previous kernel pkgs:" \$(rpm -qa "kernel*" | grep -Ev "\${KERNEL_VERSION}")
+          rpm -qa "kernel*" | grep -Ev "\${KERNEL_VERSION}" | xargs -r rpm -e --nodeps || true
         else
-            echo "Could not set Confidential Compute GPUs to Ready State" | tee -a /var/log/nvidia-cdi-gen.log
-        fi
+          dnf install -y kernel-{uki-virt,modules,modules-extra}-\${KERNEL_VERSION}
+          # Update shim fallback CSV to ensure Azure VM boots latest UKI (needed only when kernel is updated)
+          printf "shimx64.efi,redhat,\\\\\\EFI\\\\\\Linux\\\\\\\"\$(cat /etc/machine-id)"-"\$(rpm -q --queryformat %{VERSION}-%{RELEASE}\\\\\\n kernel-uki-virt | tail -1)".x86_64.efi ,UKI bootentry\n" | iconv -f ASCII -t UCS-2 > /boot/efi/EFI/redhat/BOOTX64.CSV
 
-        # Generate NVIDIA CDI configuration
-        nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml >> /var/log/nvidia-cdi-gen.log 2>&1 || exit 1
-        EOF
-          chmod 755 /usr/local/bin/generate-nvidia-cdi.sh
+          echo "removing previous kernel pkgs:" \$(rpm -qa "kernel*" | grep -Ev "\${KERNEL_VERSION}|^kernel-uki")
+          rpm -qa "kernel*" | grep -Ev "\${KERNEL_VERSION}|^kernel-uki"  | xargs -r rpm -e --nodeps || true
 
-          cat <<'EOF' > /etc/systemd/system/nvidia-cdi.service
-        [Unit]
-        Description=Generate NVIDIA CDI Configuration
-        Before=kata-agent.service
+          # TODO: check if this still needed when we switch to using NVIDIA attestation RPMs.
+          dnf install -y xmlsec1 xmlsec1-openssl
 
-        [Service]
-        Type=oneshot
-        ExecStart=/usr/local/bin/generate-nvidia-cdi.sh
-        RemainAfterExit=true
+          ##### NVIDIA DRIVERS
+          if [ -n "\${NVIDIA_DRIVER_VERSION}" ]; then
+            subscription-manager repos --enable=rhel-10-for-x86_64-supplementary-rpms
+            subscription-manager repos --enable=rhel-10-for-x86_64-extensions-rpms
+            dnf install -y --setopt=install_weak_deps=False nvidia-driver-\${NVIDIA_DRIVER_VERSION} \
+                nvidia-driver-cuda-\${NVIDIA_DRIVER_VERSION} \
+                nvidia-driver-libs-\${NVIDIA_DRIVER_VERSION} \
+                nvidia-persistenced-\${NVIDIA_DRIVER_VERSION} \
+                kmod-nvidia-open-\${NVIDIA_DRIVER_VERSION}-\${KERNEL_VERSION%.el*} \
+                nvidia-container-toolkit
+            dnf clean all
 
-        [Install]
-        WantedBy=multi-user.target
-        EOF
-          chmod 644 /etc/systemd/system/nvidia-cdi.service
-          ln -s /etc/systemd/system/nvidia-cdi.service /etc/systemd/system/multi-user.target.wants/nvidia-cdi.service
+            echo -e "blacklist nouveau\nblacklist nova_core" > /etc/modprobe.d/blacklist_nv_alt.conf
+            sed -i 's/^#no-cgroups = false/no-cgroups = true/' /etc/nvidia-container-runtime/config.toml
+
+            cat << 'EOF' > /usr/local/bin/generate-nvidia-cdi.sh
+          #!/bin/bash
+
+          # Check if NVIDIA GPU is present
+          if ! lspci | grep -i nvidia > /dev/null 2>&1; then
+              echo "No NVIDIA GPU detected, skipping NVIDIA setup" | tee /var/log/nvidia-cdi-gen.log
+              exit 0
+          fi
+
+          # Load drivers
+          nvidia-ctk -d system create-device-nodes --control-devices --load-kernel-modules
+
+          nvidia-persistenced
+
+          # Set confidential compute to ready state (non-fatal if unsupported)
+          if nvidia-smi conf-compute -srs 1 2>/dev/null; then
+              echo "Confidential Compute enabled" | tee -a /var/log/nvidia-cdi-gen.log
+          else
+              echo "Could not set Confidential Compute GPUs to Ready State" | tee -a /var/log/nvidia-cdi-gen.log
+          fi
+
+          # Generate NVIDIA CDI configuration
+          nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml >> /var/log/nvidia-cdi-gen.log 2>&1 || exit 1
+          EOF
+            chmod 755 /usr/local/bin/generate-nvidia-cdi.sh
+
+            cat <<'EOF' > /etc/systemd/system/nvidia-cdi.service
+          [Unit]
+          Description=Generate NVIDIA CDI Configuration
+          Before=kata-agent.service
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/generate-nvidia-cdi.sh
+          RemainAfterExit=true
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+            chmod 644 /etc/systemd/system/nvidia-cdi.service
+            ln -s /etc/systemd/system/nvidia-cdi.service /etc/systemd/system/multi-user.target.wants/nvidia-cdi.service
+          fi
         fi
 
         REMOTESSHEOF
@@ -369,13 +381,20 @@ spec:
         fi
 
         DISK="$1"
+        ARCH=$(uname -m)
 
         ADDON_SBAT="sbat,1,SBAT Version,sbat,1,https://github.com/rhboot/shim/blob/main/SBAT.md
         coco-podvm-uki-addon,1,Red Hat,coco-podvm-uki-addon,1,mailto:secalert@redhat.com"
 
         NBD_DEVICE=/dev/nbd0
-        EFI_PN=nbd0p1
-        ROOT_PN=nbd0p2
+        if [ "$ARCH" = "s390x" ]; then
+            ROOT_PN=nbd0p1
+            VERITY_PART_TYPE="root-s390x-verity"
+        else
+            EFI_PN=nbd0p1
+            ROOT_PN=nbd0p2
+            VERITY_PART_TYPE="root-x86-64-verity"
+        fi
 
         LUKS_MINIMAL_SPACE_MB=2500
         VERITY_MAX_SPACE_MB=512
@@ -417,7 +436,7 @@ spec:
 
         # apply_dmverity
         # create config files and folders for systemd-repart and UKI
-        systemd-repart $NBD_DEVICE --dry-run=no --definitions=/workspace/source/konflux/verity-definitions/ --no-pager --json=pretty | jq -r '.[] | select(.type == "root-x86-64-verity") | .roothash' > roothash.txt
+        systemd-repart $NBD_DEVICE --dry-run=no --definitions=/workspace/source/konflux/verity-definitions/ --no-pager --json=pretty | jq -r ".[] | select(.type == \"$VERITY_PART_TYPE\") | .roothash" > roothash.txt
         RH=$(cat roothash.txt)
 
         partprobe $NBD_DEVICE
@@ -431,44 +450,48 @@ spec:
             exit 1
         fi
 
-        # create_uki_addon
-        UKI_FOLDER=$temp_mount/EFI/Linux
-        ADDON_NAME=verity.addon.efi
-        mount /dev/$EFI_PN $temp_mount
-        efi_files=($UKI_FOLDER/*.efi)
-        # Check if any EFI files exist
-        if [[ ${#efi_files[@]} -eq 0 || ! -f "${efi_files[0]}" ]]; then
-            echo "Error: No .efi files found in $UKI_FOLDER"
-            exit 1
-        fi
+        # create_uki_addon (x86_64 UEFI)
+        if [ "$ARCH" != "s390x" ]; then
+            UKI_FOLDER=$temp_mount/EFI/Linux
+            ADDON_NAME=verity.addon.efi
+            mount /dev/$EFI_PN $temp_mount
+            efi_files=($UKI_FOLDER/*.efi)
+            # Check if any EFI files exist
+            if [[ ${#efi_files[@]} -eq 0 || ! -f "${efi_files[0]}" ]]; then
+                echo "Error: No .efi files found in $UKI_FOLDER"
+                exit 1
+            fi
 
-        # If multiple files, pick the most recent one
-        if [[ ${#efi_files[@]} -gt 1 ]]; then
-            echo "Found ${#efi_files[@]} EFI files: ${efi_files[@]}"
-            echo ""
-            echo "Current EFI fallback value (/boot/efi/EFI/redhat/BOOTX64.CSV):"
-            cat mnt/EFI/redhat/BOOTX64.CSV
-            echo ""
-            echo "Selecting the most recently modified UKI..."
-            UKI_NAME=$(ls -t "${efi_files[@]}" | head -1)
+            # If multiple files, pick the most recent one
+            if [[ ${#efi_files[@]} -gt 1 ]]; then
+                echo "Found ${#efi_files[@]} EFI files: ${efi_files[@]}"
+                echo ""
+                echo "Current EFI fallback value (/boot/efi/EFI/redhat/BOOTX64.CSV):"
+                cat mnt/EFI/redhat/BOOTX64.CSV
+                echo ""
+                echo "Selecting the most recently modified UKI..."
+                UKI_NAME=$(ls -t "${efi_files[@]}" | head -1)
+            else
+                UKI_NAME=${efi_files[0]}
+            fi
+
+            echo "Using UKI: $UKI_NAME"
+            mkdir -p "$UKI_NAME.extra.d"
+            cd $UKI_NAME.extra.d
+            rm -f $ADDON_NAME
+
+            if [[ -n "$SB_PRIVATE_KEY" && -n "$SB_CERTIFICATE" ]]; then
+                ADDON_OPTIONS="--secureboot-private-key=$SB_PRIVATE_KEY --secureboot-certificate=$SB_CERTIFICATE"
+                echo "Signing addon with $SB_PRIVATE_KEY and $SB_CERTIFICATE"
+            fi
+            /usr/lib/systemd/ukify build --cmdline="roothash=$RH systemd.volatile=overlay" --output=$ADDON_NAME --sbat="$ADDON_SBAT" $ADDON_OPTIONS
+            echo "Created UKI addon $UKI_NAME.extra.d/$ADDON_NAME"
+            /usr/lib/systemd/ukify inspect $ADDON_NAME
+            cd
+            umount $temp_mount
         else
-            UKI_NAME=${efi_files[0]}
+            echo "Verity applied with Root Hash: $RH. On s390x, append 'roothash=$RH systemd.volatile=overlay' to zipl boot configuration."
         fi
-
-        echo "Using UKI: $UKI_NAME"
-        mkdir -p "$UKI_NAME.extra.d"
-        cd $UKI_NAME.extra.d
-        rm -f $ADDON_NAME
-
-        if [[ -n "$SB_PRIVATE_KEY" && -n "$SB_CERTIFICATE" ]]; then
-            ADDON_OPTIONS="--secureboot-private-key=$SB_PRIVATE_KEY --secureboot-certificate=$SB_CERTIFICATE"
-            echo "Signing addon with $SB_PRIVATE_KEY and $SB_CERTIFICATE"
-        fi
-        /usr/lib/systemd/ukify build --cmdline="roothash=$RH systemd.volatile=overlay" --output=$ADDON_NAME --sbat="$ADDON_SBAT" $ADDON_OPTIONS
-        echo "Created UKI addon $UKI_NAME.extra.d/$ADDON_NAME"
-        /usr/lib/systemd/ukify inspect $ADDON_NAME
-        cd
-        umount $temp_mount
 
         # Debug
         fdisk -l $NBD_DEVICE

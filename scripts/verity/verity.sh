@@ -87,11 +87,12 @@ function print_params()
 
 function handle_ctrlc()
 {
-    if [[ $root_mounted == 1 ]]; then
-        umount $VERITY_FOLDER/mnt
-    fi
     if [[ $esp_mounted == 1 ]]; then
-        umount $VERITY_FOLDER/mnt
+        # Unmount any s390x chroot bind mounts first (no-op if not mounted)
+        umount $VERITY_FOLDER/mnt/dev  2>/dev/null || true
+        umount $VERITY_FOLDER/mnt/proc 2>/dev/null || true
+        umount $VERITY_FOLDER/mnt/sys  2>/dev/null || true
+        umount $VERITY_FOLDER/mnt      2>/dev/null || true
     fi
     if [[ $nbd_mounted == 1 ]]; then
         qemu-nbd --disconnect $NBD_DEVICE
@@ -104,27 +105,30 @@ function handle_ctrlc()
 trap handle_ctrlc SIGINT
 trap handle_ctrlc EXIT
 
+ARCH=$(uname -m)
 DISK_FORMAT=${DISK_FORMAT:-"raw"}
 APPLY_VERITY=${APPLY_VERITY:-"true"}
 CONSOLE_KERNEL=${CONSOLE_KERNEL:-"false"}
-ROOT_PARTITION_UUID=${ROOT_PARTITION_UUID:-"4f68bce3-e8cd-4db1-96e7-fbcaf984b709"}
+if [ "$ARCH" = "s390x" ]; then
+    DEFAULT_ROOT_PART_UUID="69a113b8-15a0-4e37-a5b6-3e10a03e0343"
+    CONSOLE_CMDLINE="console=ttysclp0"
+    VERITY_PART_TYPE="root-s390x-verity"
+else
+    DEFAULT_ROOT_PART_UUID="4f68bce3-e8cd-4db1-96e7-fbcaf984b709"
+    CONSOLE_CMDLINE="console=ttyS0"
+    VERITY_PART_TYPE="root-x86-64-verity"
+fi
+ROOT_PARTITION_UUID=${ROOT_PARTITION_UUID:-"$DEFAULT_ROOT_PART_UUID"}
 NBD_DEV=${NBD_DEV:-"0"}
 NBD_DEVICE=/dev/nbd${NBD_DEV}
 RESIZE_DISK=${RESIZE_DISK:-"yes"}
 
 EFI_PARTITION_UUID="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
-CONSOLE_CMDLINE="console=ttyS0"
 
 function resize_disk()
 {
     DISK_RESIZE=$1
-    MB=$((1024 * 1024))
-    current_size=$(qemu-img info -f $DISK_FORMAT --output json $DISK_RESIZE | jq '."virtual-size"')
-    export current_size
     luks_min_space=$((LUKS_MINIMAL_SPACE_MB * MB))
-    # verity_max_space=$((VERITY_MAX_SPACE_MB * MB))
-    verity_max_space=$((current_size * 7 / 100)) # get 7% for verity
-    export verity_max_space
     new_size=$((current_size + luks_min_space + verity_max_space))
     rounded_size=$(((new_size + MB - 1) / MB * MB))
     echo "Current disk size: $current_size"
@@ -134,18 +138,20 @@ function resize_disk()
 
 function find_efi_root_part()
 {
-    echo "Searching for root partition..."
-    EFI_PN=$(lsblk -o NAME,PARTTYPE -r $NBD_DEVICE | grep $EFI_PARTITION_UUID)
-    num_results=$(echo "$EFI_PN" | wc -l)
-    if [[ "$num_results" -ne 1 || -z "$EFI_PN" ]]; then
-        echo "Error: Expected one EFI System Partition, found $num_results."
-        exit 1
+    echo "Searching for partitions..."
+    if [ "$ARCH" != "s390x" ]; then
+        EFI_PN=$(lsblk -o NAME,PARTTYPE -r $NBD_DEVICE | grep -i $EFI_PARTITION_UUID || true)
+        num_results=$(echo "$EFI_PN" | grep -v '^$' | wc -l || true)
+        if [[ "$num_results" -ne 1 || -z "$EFI_PN" ]]; then
+            echo "Error: Expected one EFI System Partition, found $num_results."
+            exit 1
+        fi
+        EFI_PN=$(echo $EFI_PN | awk '{print  $1}')
+        echo EFI PARTITION=$EFI_PN
     fi
-    EFI_PN=$(echo $EFI_PN | awk '{print  $1}')
-    echo EFI PARTITION=$EFI_PN
 
-    ROOT_PN=$(lsblk -o NAME,PARTTYPE -r $NBD_DEVICE | grep $ROOT_PARTITION_UUID)
-    num_results=$(echo "$ROOT_PN" | wc -l)
+    ROOT_PN=$(lsblk -o NAME,PARTTYPE -r $NBD_DEVICE | grep -i $ROOT_PARTITION_UUID || true)
+    num_results=$(echo "$ROOT_PN" | grep -v '^$' | wc -l || true)
     if [[ "$num_results" -ne 1 || -z "$ROOT_PN" ]]; then
         echo "Error: Expected one Root $ROOT_PARTITION_UUID, found $num_results."
         exit 1
@@ -182,9 +188,18 @@ function apply_dmverity()
     WORKDIR=conf
     mkdir $WORKDIR
 
+    # Set arch-specific partition types for systemd-repart
+    if [ "$ARCH" = "s390x" ]; then
+        ROOT_PART_TYPE="root-s390x"
+        VERITY_CONF_TYPE="root-s390x-verity"
+    else
+        ROOT_PART_TYPE="root-x86-64"
+        VERITY_CONF_TYPE="root-x86-64-verity"
+    fi
+
     # Verity partition has to be 7% of the original partition.
     echo "[Partition]
-    Type=root-verity
+    Type=${VERITY_CONF_TYPE}
     Verity=hash
     VerityMatchKey=root
     PaddingWeight=1
@@ -193,12 +208,12 @@ function apply_dmverity()
 
     # Used just to reference the root
     echo "[Partition]
-    Type=root
+    Type=${ROOT_PART_TYPE}
     Verity=data
     VerityMatchKey=root
     SizeMaxBytes=${current_size}" > $WORKDIR/root.conf
 
-    SYSTEMD_LOG_LEVEL=debug systemd-repart $NBD_DEVICE --dry-run=no --definitions=$WORKDIR --no-pager --json=pretty | jq -r '.[] | select(.type == "root-x86-64-verity") | .roothash' > $WORKDIR/roothash.txt
+    SYSTEMD_LOG_LEVEL=debug systemd-repart $NBD_DEVICE --dry-run=no --definitions=$WORKDIR --no-pager --json=pretty | jq -r ".[] | select(.type == \"$VERITY_PART_TYPE\") | .roothash" > $WORKDIR/roothash.txt
     RH=$(cat $WORKDIR/roothash.txt)
     rm -rf $WORKDIR
 
@@ -264,6 +279,14 @@ function create_uki_addon()
 
 print_params
 
+# Always compute current_size and verity_max_space — needed by apply_dmverity()
+# regardless of whether the disk is being resized.
+MB=$((1024 * 1024))
+current_size=$(qemu-img info -f $DISK_FORMAT --output json $DISK | jq '."virtual-size"')
+export current_size
+verity_max_space=$((current_size * 7 / 100))
+export verity_max_space
+
 if [ "$RESIZE_DISK" = "yes" ]; then
     echo ""
     echo "Resizing disk..."
@@ -280,12 +303,12 @@ qemu-nbd -c $NBD_DEVICE -f $DISK_FORMAT $DISK
 udevadm settle
 sleep 2
 
-# Step 1. Find the EFI partition automatically
+# Step 1. Find the EFI and root partition
 echo ""
 find_efi_root_part
 
 # Step 2. Apply cmdline to /EFI/redhat/BOOTX64.CSV
-if [ "$CONSOLE_KERNEL" = "true" ]; then
+if [ "$CONSOLE_KERNEL" = "true" ] && [ "$ARCH" != "s390x" ]; then
     echo ""
     fix_bootx_cmdline
 fi
@@ -298,9 +321,55 @@ if [ "$APPLY_VERITY" = "true" ]; then
     echo ""
     apply_dmverity
 
-    # Step 4. Prepare and install the addon
-    echo ""
-    create_uki_addon
+    # Step 4. Prepare and install the addon / update bootloader
+    if [ "$ARCH" != "s390x" ]; then
+        echo ""
+        create_uki_addon
+    else
+        echo "Verity applied with Root Hash: $RH."
+        echo "Step 4 (s390x): Mounting root partition to update zipl boot configuration..."
+
+        mount /dev/$ROOT_PN mnt
+        esp_mounted=1
+
+        # RHEL 10 uses BLS (Boot Loader Spec) — roothash goes into
+        # /boot/loader/entries/*.conf options= line, not zipl.conf parameters=
+        BLS_DIR="mnt/boot/loader/entries"
+        if ls ${BLS_DIR}/*.conf 2>/dev/null | grep -qv rescue; then
+            for bls in ${BLS_DIR}/*.conf; do
+                # skip rescue entries
+                [[ "$bls" == *rescue* ]] && continue
+                echo "Patching BLS entry: $bls"
+                # Append roothash and overlay to the options= line
+                sed -i "s|^\(options .*\)|\1 roothash=${RH} systemd.volatile=overlay|" "$bls"
+                echo "Updated BLS entry:"
+                cat "$bls"
+            done
+        else
+            echo "Warning: No BLS entries found — falling back to zipl.conf parameters= patch"
+            if [ -f mnt/etc/zipl.conf ]; then
+                sed -i "s|^\(parameters=[^\"]*[^ ]\) *$|\1 roothash=${RH} systemd.volatile=overlay|" mnt/etc/zipl.conf
+                sed -i "s|^\(parameters=\".*\)\"\( *\)$|\1 roothash=${RH} systemd.volatile=overlay\"\2|" mnt/etc/zipl.conf
+                echo "Updated /etc/zipl.conf:"; cat mnt/etc/zipl.conf
+            fi
+        fi
+
+        # Re-run zipl inside the chroot so the bootmap is updated on disk.
+        # Pass the NBD device explicitly so zipl can query disk geometry.
+        if [ -x mnt/sbin/zipl ]; then
+            mount --bind /dev  mnt/dev
+            mount --bind /proc mnt/proc
+            mount --bind /sys  mnt/sys
+            chroot mnt /sbin/zipl -t /boot --targetbase /dev/${ROOT_PN%p*} --targettype SCSI
+            umount mnt/dev mnt/proc mnt/sys
+        else
+            echo "Warning: /sbin/zipl not found in image — bootmap not updated."
+        fi
+
+        esp_mounted=0
+        umount mnt
+        echo "s390x zipl boot configuration updated with roothash=${RH}."
+    fi
 fi
 
 
